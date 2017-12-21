@@ -95,7 +95,7 @@ class EasyRdf_Http_Response
         $version = '1.1',
         $message = null
     ) {
-        $this->status = intval($status);
+        $this->status = (int) $status;
         $this->body = $body;
         $this->version = $version;
         $this->message = $message;
@@ -164,19 +164,17 @@ class EasyRdf_Http_Response
      */
     public function getBody()
     {
-        // Decode the body if it was transfer-encoded
-        switch (strtolower($this->getHeader('transfer-encoding'))) {
-            // Handle chunked body
-            case 'chunked':
-                return self::decodeChunkedBody($this->body);
-                break;
-
-            // No transfer encoding, or unknown encoding extension:
-            // return body as is
-            default:
-                return $this->body;
-                break;
-        }
+      $body = $this->body;
+      if ('chunked' === strtolower($this->getHeader('transfer-encoding'))) {
+        $body = self::decodeChunkedBody($body);
+      }
+      $contentEncoding = strtolower($this->getHeader('content-encoding'));
+      if ('gzip' === $contentEncoding) {
+        $body = self::decodeGzip($body);
+      } elseif ('deflate' === $contentEncoding) {
+        $body = self::decodeDeflate($body);
+      }
+      return $body;
     }
 
     /**
@@ -223,9 +221,8 @@ class EasyRdf_Http_Response
         $header = ucwords(strtolower($header));
         if (array_key_exists($header, $this->headers)) {
             return $this->headers[$header];
-        } else {
-            return null;
         }
+        return null;
     }
 
     /**
@@ -267,7 +264,7 @@ class EasyRdf_Http_Response
     {
         // First, split body and headers
         $matches = preg_split('|(?:\r?\n){2}|m', $responseStr, 2);
-        if ($matches and sizeof($matches) == 2) {
+        if ($matches and 2 === count($matches)) {
             list ($headerLines, $body) = $matches;
         } else {
             throw new EasyRdf_Exception(
@@ -315,25 +312,81 @@ class EasyRdf_Http_Response
      *
      * @param string $body
      * @return string
+     *
+     * @throws \EasyRdf\Exception
      */
     public static function decodeChunkedBody($body)
     {
         $decBody = '';
 
-        while (trim($body)) {
-            if (preg_match('/^([\da-fA-F]+)[^\r\n]*\r\n/sm', $body, $m)) {
-                $length = hexdec(trim($m[1]));
-                $cut = strlen($m[0]);
-                $decBody .= substr($body, $cut, $length);
-                $body = substr($body, $cut + $length + 2);
-            } else {
-                throw new EasyRdf_Exception(
-                    "Failed to decode chunked body in HTTP response."
-                );
-            }
+      while (trim($body)) {
+        if (!preg_match("/^([\da-fA-F]+)[^\r\n]*\r\n/sm", $body, $m)) {
+          throw new Exception(
+            "Error parsing body - doesn't seem to be a chunked message"
+          );
         }
+        $length   = hexdec(trim($m[1]));
+        $cut      = strlen($m[0]);
+        $decBody .= substr($body, $cut, $length);
+        $body     = substr($body, $cut + $length + 2);
+      }
 
-        return $decBody;
+      return $decBody;
+    }
+    /**
+     * Decode a gzip encoded message (when Content-encoding = gzip)
+     *
+     * Currently requires PHP with zlib support
+     *
+     * @param string $body
+     *
+     * @throws Exception
+     *
+     * @return string
+     */
+    public static function decodeGzip($body)
+    {
+      if (!function_exists('gzinflate')) {
+        throw new Exception(
+          'zlib extension is required in order to decode "gzip" encoding'
+        );
+      }
+      return gzinflate(substr($body, 10));
+    }
+    /**
+     * Decode a zlib deflated message (when Content-encoding = deflate)
+     *
+     * Currently requires PHP with zlib support
+     *
+     * @param string $body
+     *
+     * @throws Exception
+     *
+     * @return string
+     */
+    public static function decodeDeflate($body)
+    {
+      if (!function_exists('gzuncompress')) {
+        throw new Exception(
+          'zlib extension is required in order to decode "deflate" encoding'
+        );
+      }
+      /**
+       * Some servers (IIS ?) send a broken deflate response, without the
+       * RFC-required zlib header.
+       *
+       * We try to detect the zlib header, and if it does not exist we
+       * teat the body is plain DEFLATE content.
+       *
+       * This method was adapted from PEAR HTTP_Request2 by (c) Alexey Borzov
+       *
+       * @link http://framework.zend.com/issues/browse/ZF-6040
+       */
+      $zlibHeader = unpack('n', substr($body, 0, 2));
+      if ($zlibHeader[1] % 31 === 0) {
+        return gzuncompress($body);
+      }
+      return gzinflate($body);
     }
 
 
